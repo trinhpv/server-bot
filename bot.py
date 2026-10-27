@@ -112,6 +112,7 @@ def handle_buttons(message):
         return
     text = message.text
 
+    logger.info(f"Admin yêu cầu lệnh: '{text}'")
     if text == "⚡ Bật máy tính":
         bot.send_message(message.chat.id, "⏳ Đang kiểm tra...")
         if subprocess.run(["ping", "-c", "1", "-W", "2", PC_IP], stdout=subprocess.DEVNULL).returncode == 0:

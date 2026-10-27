@@ -45,7 +45,7 @@ def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn_wake = KeyboardButton("⚡ Bật máy tính")
     btn_status = KeyboardButton("🖥️ Trạng thái PC")
-    btn_server_full = KeyboardButton("📊 Thông tin Máy chủ (Toàn diện)")
+    btn_server_full = KeyboardButton("📊 Thông tin Máy chủ")
     btn_update = KeyboardButton("🔄 Cập nhật Code")
     markup.add(btn_wake, btn_status, btn_server_full, btn_update)
     return markup

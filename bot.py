@@ -160,18 +160,21 @@ def handle_buttons(message):
         except Exception as e:
             bot.send_message(message.chat.id, f"⚠️ Lỗi: `{e}`", parse_mode="Markdown")
 
-    # ----- 4. LỆNH CẬP NHẬT CODE TỪ GITHUB -----
+   # ----- 4. LỆNH CẬP NHẬT CODE TỪ GITHUB -----
     elif text == "🔄 Cập nhật Code":
         try:
             bot.send_message(message.chat.id, "⏳ Đang tải code mới từ GitHub...")
-            subprocess.run(["sudo", "git", "config", "--global", "--add", "safe.directory", BASE_DIR], check=False)
-            res = subprocess.run(["sudo", "git", "pull"], capture_output=True, text=True, cwd=BASE_DIR)
+            
+            subprocess.run(["sudo", "git", "config", "--global", "--add", "safe.directory", BASE_DIR])
+            
+            # ĐÃ SỬA: Dùng cú pháp tương thích với Python 3.6
+            res = subprocess.run(["sudo", "git", "pull"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, cwd=BASE_DIR)
+            
             bot.send_message(message.chat.id, f"Trạng thái Git:\n`{res.stdout}`\n\n🔄 Code mới đã tải xong! Bot sẽ tự khởi động lại trong 3 giây...", parse_mode="Markdown")
             
-            # Hàm "tự sát" ngay lập tức để vòng lặp bên ngoài khởi động lại
             def kill_bot():
-                time.sleep(2) # Đợi 2s để tin nhắn trên kịp gửi đi
-                os._exit(0)   # Dập tắt toàn bộ tiến trình Python ngay lập tức
+                time.sleep(2) 
+                os._exit(0)   
                 
             threading.Thread(target=kill_bot, daemon=True).start()
             

@@ -126,7 +126,7 @@ def handle_buttons(message):
         else:
             bot.send_message(message.chat.id, "🔴 PC đang **TẮT**.", parse_mode="Markdown")
 
-    elif text == "📊 Thông tin Máy chủ (Toàn diện)":
+    elif text == "📊 Thông tin Máy chủ":
         try:
             bot.send_message(message.chat.id, "⏳ Đang thu thập dữ liệu...")
             uptime_str = str(datetime.timedelta(seconds=int(time.time() - psutil.boot_time())))

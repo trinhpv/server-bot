@@ -160,27 +160,20 @@ def handle_buttons(message):
         except Exception as e:
             bot.send_message(message.chat.id, f"⚠️ Lỗi: `{e}`", parse_mode="Markdown")
 
+    # ----- 4. LỆNH CẬP NHẬT CODE TỪ GITHUB -----
     elif text == "🔄 Cập nhật Code":
         try:
             bot.send_message(message.chat.id, "⏳ Đang tải code mới từ GitHub...")
-            
-            # Cấp quyền thư mục cho Git để tránh lỗi dubious ownership khi chạy sudo
             subprocess.run(["sudo", "git", "config", "--global", "--add", "safe.directory", BASE_DIR], check=False)
-            
-            # Chạy lệnh pull với quyền sudo
             res = subprocess.run(["sudo", "git", "pull"], capture_output=True, text=True, cwd=BASE_DIR)
+            bot.send_message(message.chat.id, f"Trạng thái Git:\n`{res.stdout}`\n\n🔄 Code mới đã tải xong! Bot sẽ tự khởi động lại trong 3 giây...", parse_mode="Markdown")
             
-            bot.send_message(message.chat.id, f"Trạng thái Git:\n`{res.stdout}`\n\n🔄 Đang ngắt kết nối và khởi động lại Bot...", parse_mode="Markdown")
-            
-            # Hàm chạy ngầm để ngắt kết nối an toàn và khởi động lại
-            def restart_bot():
-                time.sleep(2)
-                bot.stop_polling()
-                time.sleep(2)
-                # Tự động gọi lại tiến trình Python
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+            # Hàm "tự sát" ngay lập tức để vòng lặp bên ngoài khởi động lại
+            def kill_bot():
+                time.sleep(2) # Đợi 2s để tin nhắn trên kịp gửi đi
+                os._exit(0)   # Dập tắt toàn bộ tiến trình Python ngay lập tức
                 
-            threading.Thread(target=restart_bot, daemon=True).start()
+            threading.Thread(target=kill_bot, daemon=True).start()
             
         except Exception as e:
             bot.send_message(message.chat.id, f"⚠️ Lỗi cập nhật: {e}")

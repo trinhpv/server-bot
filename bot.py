@@ -39,17 +39,19 @@ metrics_logger.addHandler(metrics_handler)
 
 # KHỞI TẠO BOT
 bot = telebot.TeleBot(BOT_TOKEN)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # Lấy thư mục gốc chứa code
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# ================= MENU =================
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn_wake = KeyboardButton("⚡ Bật máy tính")
     btn_status = KeyboardButton("🖥️ Trạng thái PC")
-    btn_server_full = KeyboardButton("📊 Thông tin Máy chủ")
+    btn_server_full = KeyboardButton("📊 Thông tin Máy chủ (Toàn diện)")
     btn_update = KeyboardButton("🔄 Cập nhật Code")
     markup.add(btn_wake, btn_status, btn_server_full, btn_update)
     return markup
 
+# ================= LUỒNG CHẠY NGẦM =================
 def log_system_metrics_background():
     logger.info("Đã chạy luồng ghi system_metrics.txt")
     while True:
@@ -66,7 +68,7 @@ def log_system_metrics_background():
             cpu_pct = psutil.cpu_percent(interval=1)
             ram_pct = psutil.virtual_memory().percent
             metrics_logger.info(f"CPU: {cpu_pct}% ({cpu_temp}°C) | RAM: {ram_pct}% | PIN: {bat_pct}% ({bat_status}, {bat_temp}°C)")
-        except Exception as e:
+        except Exception:
             pass
         time.sleep(300)
 
@@ -98,6 +100,7 @@ def monitor_server_background():
             pass
         time.sleep(60)
 
+# ================= XỬ LÝ LỆNH =================
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     if message.chat.id == MY_CHAT_ID:
@@ -160,10 +163,25 @@ def handle_buttons(message):
     elif text == "🔄 Cập nhật Code":
         try:
             bot.send_message(message.chat.id, "⏳ Đang tải code mới từ GitHub...")
-            res = subprocess.run(["git", "pull"], capture_output=True, text=True, cwd=BASE_DIR)
-            bot.send_message(message.chat.id, f"Trạng thái Git:\n`{res.stdout}`\n\n🔄 Đang khởi động lại Bot...", parse_mode="Markdown")
-            time.sleep(2)
-            os.execv(sys.executable, ['python3'] + sys.argv)
+            
+            # Cấp quyền thư mục cho Git để tránh lỗi dubious ownership khi chạy sudo
+            subprocess.run(["sudo", "git", "config", "--global", "--add", "safe.directory", BASE_DIR], check=False)
+            
+            # Chạy lệnh pull với quyền sudo
+            res = subprocess.run(["sudo", "git", "pull"], capture_output=True, text=True, cwd=BASE_DIR)
+            
+            bot.send_message(message.chat.id, f"Trạng thái Git:\n`{res.stdout}`\n\n🔄 Đang ngắt kết nối và khởi động lại Bot...", parse_mode="Markdown")
+            
+            # Hàm chạy ngầm để ngắt kết nối an toàn và khởi động lại
+            def restart_bot():
+                time.sleep(2)
+                bot.stop_polling()
+                time.sleep(2)
+                # Tự động gọi lại tiến trình Python
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+                
+            threading.Thread(target=restart_bot, daemon=True).start()
+            
         except Exception as e:
             bot.send_message(message.chat.id, f"⚠️ Lỗi cập nhật: {e}")
 

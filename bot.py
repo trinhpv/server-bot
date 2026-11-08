@@ -68,6 +68,56 @@ def main_menu():
     markup.add(btn_wake, btn_status, btn_server_full, btn_chart, btn_update)
     return markup
 
+# ================= KIỂM TRA TRẠNG THÁI PC ĐA TẦNG =================
+def is_pc_online(ip, mac=None):
+    """Kiểm tra trạng thái PC chuẩn xác trên môi trường Linux/Android + Windows"""
+    # 1. Kiểm tra qua TCP Socket (Port 135 RPC, 445 SMB, 3389 RDP của Windows)
+    # Kể cả bị từ chối kết nối (errno 111 - Connection refused) cũng chứng tỏ PC đang BẬT
+    for port in (135, 445, 3389):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        try:
+            result = s.connect_ex((ip, port))
+            if result in (0, 111):
+                return True
+        except Exception:
+            pass
+        finally:
+            s.close()
+
+    # 2. Kiểm tra bằng sudo ping (tránh lỗi thiếu quyền raw socket trên Linux Deploy)
+    try:
+        res = subprocess.run(
+            ["sudo", "ping", "-c", "1", "-W", "2", ip],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        if res.returncode == 0:
+            return True
+    except Exception:
+        pass
+
+    # 3. Quét bảng ARP theo địa chỉ MAC (Phát hiện được kể cả khi Windows chặn Ping & Port)
+    if mac:
+        try:
+            # Gửi 1 gói UDP rỗng để kích thích cập nhật bảng ARP trước khi đọc
+            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_sock.sendto(b"", (ip, 9))
+            udp_sock.close()
+            time.sleep(0.2)
+
+            with open("/proc/net/arp", "r") as f:
+                arp_table = f.read().lower()
+                target_mac = mac.lower().replace("-", ":")
+                for line in arp_table.splitlines():
+                    # Cờ 0x2 trong /proc/net/arp nghĩa là thiết bị đang hiện diện (Complete)
+                    if target_mac in line and "0x2" in line:
+                        return True
+        except Exception:
+            pass
+
+    return False
+
 # ================= HÀM THU THẬP THÔNG SỐ HỆ THỐNG =================
 def read_sys_file(path, scale=1.0, default=None):
     """Đọc file hệ thống an toàn, tự động chia tỉ lệ nếu là nhiệt độ"""
@@ -245,7 +295,7 @@ def handle_buttons(message):
     # ----- 1. BẬT MÁY TÍNH -----
     if text == "⚡ Bật máy tính":
         bot.send_message(message.chat.id, "⏳ Đang kiểm tra...")
-        if subprocess.run(["ping", "-c", "1", "-W", "2", PC_IP], stdout=subprocess.DEVNULL).returncode == 0:
+        if is_pc_online(PC_IP, PC_MAC):
             bot.send_message(message.chat.id, "🟢 Máy tính **ĐÃ BẬT SẴN**.", parse_mode="Markdown")
         else:
             subprocess.run(["wakeonlan", PC_MAC])
@@ -253,7 +303,7 @@ def handle_buttons(message):
 
     # ----- 2. TRẠNG THÁI PC -----
     elif text == "🖥️ Trạng thái PC":
-        if subprocess.run(["ping", "-c", "1", "-W", "2", PC_IP], stdout=subprocess.DEVNULL).returncode == 0:
+        if is_pc_online(PC_IP, PC_MAC):
             bot.send_message(message.chat.id, "🟢 PC đang **ONLINE**!", parse_mode="Markdown")
         else:
             bot.send_message(message.chat.id, "🔴 PC đang **TẮT**.", parse_mode="Markdown")

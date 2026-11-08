@@ -1,4 +1,4 @@
-import telebot
+﻿import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import subprocess
 import socket
@@ -21,6 +21,8 @@ import matplotlib.dates as mdates
 # ================= LẤY THÔNG SỐ BẢO MẬT =================
 try:
     from config import BOT_TOKEN, MY_CHAT_ID, PC_MAC, PC_IP
+    PC_IP = str(PC_IP).strip()
+    PC_MAC = str(PC_MAC).strip()
 except ImportError:
     print("LỖI: Không tìm thấy file config.py!")
     sys.exit(1)
@@ -68,86 +70,13 @@ def main_menu():
     markup.add(btn_wake, btn_status, btn_server_full, btn_chart, btn_update)
     return markup
 
-# ================= KIỂM TRA TRẠNG THÁI PC ĐA TẦNG =================
-def is_pc_online(ip, mac=None):
-    """Kiểm tra trạng thái PC chuẩn xác trên môi trường Linux/Android + Windows"""
-    import errno
-
-    # 1. Kiểm tra qua TCP Socket (Port 445 SMB, 135 RPC, 3389 RDP, 139 NetBIOS)
-    # Kể cả bị từ chối kết nối (ECONNREFUSED) cũng chứng tỏ PC đang BẬT
-    # Chỉ timeout/unreachable mới là dấu hiệu host tắt
-    DEAD_ERRORS = {
-        errno.ETIMEDOUT,      # 110 - Timeout (firewall DROP hoặc host tắt)
-        errno.EHOSTUNREACH,   # 113 - No route to host
-        errno.ENETUNREACH,    # 101 - Network unreachable
-    }
-    for port in (445, 135, 3389, 139):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2.5)  # Tăng timeout từ 1s lên 2.5s để giảm false-negative
-        try:
-            result = s.connect_ex((ip, port))
-            # result == 0: kết nối thành công (port mở)
-            # result khác 0 nhưng KHÔNG thuộc nhóm DEAD: host đang phản hồi (VD: ECONNREFUSED)
-            if result == 0 or (result != 0 and result not in DEAD_ERRORS):
-                logger.info(f"PC online qua TCP port {port} (code={result})")
-                return True
-        except socket.timeout:
-            # Firewall DROP hoặc host tắt -> thử port tiếp theo
-            pass
-        except OSError:
-            pass
-        finally:
-            s.close()
-
-    # 2. Kiểm tra bằng sudo ping (tránh lỗi thiếu quyền raw socket trên Linux Deploy)
-    try:
-        res = subprocess.run(
-            ["sudo", "ping", "-c", "2", "-W", "3", ip],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        if res.returncode == 0:
-            logger.info("PC online qua ping")
+# ================= KIỂM TRA TRẠNG THÁI PC (CHUẨN CODE GỐC) =================
+def check_pc_online():
+    """Sử dụng đúng lệnh ping gốc hoạt động ổn định trên máy của bạn"""
+    # Thử ping 1 gói như code gốc, nếu hụt gói ARP đầu tiên thì thử lại ngay 1 lần nữa
+    for _ in range(2):
+        if subprocess.run(["ping", "-c", "1", "-W", "2", PC_IP], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
             return True
-    except Exception:
-        pass
-
-    # 3. Quét bảng ARP theo địa chỉ MAC (Phát hiện được kể cả khi Windows chặn Ping & Port)
-    if mac:
-        target_mac = mac.lower().replace("-", ":")
-        try:
-            # Gửi nhiều gói UDP có payload thực để kích thích cập nhật bảng ARP
-            for _ in range(3):
-                udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                udp_sock.sendto(b"\x00", (ip, 9))  # 1 byte thực thay vì rỗng
-                udp_sock.close()
-                time.sleep(0.15)
-            time.sleep(0.5)  # Chờ đủ thời gian cho ARP resolution hoàn tất
-
-            with open("/proc/net/arp", "r") as f:
-                arp_table = f.read().lower()
-                for line in arp_table.splitlines():
-                    # Cờ 0x2 trong /proc/net/arp nghĩa là thiết bị đang hiện diện (Complete)
-                    if target_mac in line and "0x2" in line:
-                        logger.info("PC online qua ARP")
-                        return True
-        except Exception:
-            pass
-
-        # 4. Thử arping trực tiếp (Layer 2, bypass mọi firewall)
-        try:
-            res = subprocess.run(
-                ["sudo", "arping", "-c", "2", "-w", "3", ip],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                universal_newlines=True
-            )
-            if res.returncode == 0 and target_mac in res.stdout.lower():
-                logger.info("PC online qua arping")
-                return True
-        except Exception:
-            pass
-
     return False
 
 # ================= HÀM THU THẬP THÔNG SỐ HỆ THỐNG =================
@@ -178,7 +107,7 @@ def get_system_metrics():
         "bat_status": read_sys_file("/sys/class/power_supply/battery/status", default="Unknown")
     }
 
-# ================= HÀM VẼ BIỂU ĐỒ 24H =================
+# ================= HÀM VẼ BIỂU ĐỒ 24H (TƯƠNG THÍCH MATPLOTLIB 2.1+) =================
 def generate_24h_chart():
     """Đọc dữ liệu 24h qua từ CSV và trả về buffer ảnh PNG trong RAM"""
     cutoff_time = datetime.datetime.now() - datetime.timedelta(hours=24)
@@ -186,7 +115,6 @@ def generate_24h_chart():
     cpu_pcts, ram_pcts = [], []
     cpu_temps, bat_temps, bat_pcts = [], [], []
 
-    # Đọc cả file backup .1 (nếu vừa rotate) và file hiện tại theo thứ tự thời gian
     files_to_read = [f"{METRICS_FILE}.1", METRICS_FILE]
 
     for filepath in files_to_read:
@@ -195,7 +123,6 @@ def generate_24h_chart():
         with open(filepath, "r", encoding="utf-8") as f:
             reader = csv.reader(f)
             for row in reader:
-                # Cấu trúc dòng: timestamp, cpu_pct, cpu_temp, ram_pct, disk_pct, bat_pct, bat_temp, bat_status
                 if len(row) < 8 or row[1] == "cpu_pct":
                     continue
                 try:
@@ -206,14 +133,14 @@ def generate_24h_chart():
                     c_pct = float(row[1])
                     c_temp = float(row[2])
                     r_pct = float(row[3])
-                    b_pct = float(row[5]) if row[5] != "N/A" else None
+                    b_pct = float(row[5]) if row[5] != "N/A" else 0.0
                     b_temp = float(row[6])
 
                     timestamps.append(dt)
                     cpu_pcts.append(c_pct)
                     ram_pcts.append(r_pct)
-                    cpu_temps.append(c_temp if c_temp > 0 else None)
-                    bat_temps.append(b_temp if b_temp > 0 else None)
+                    cpu_temps.append(c_temp if c_temp > 0 else 0.0)
+                    bat_temps.append(b_temp if b_temp > 0 else 0.0)
                     bat_pcts.append(b_pct)
                 except Exception:
                     continue
@@ -221,7 +148,9 @@ def generate_24h_chart():
     if len(timestamps) < 2:
         return None
 
-    # Khởi tạo khung biểu đồ (3 biểu đồ xếp dọc dùng chung trục thời gian)
+    # Quy đổi datetime sang số thực chuẩn của matplotlib cũ để tránh lỗi trục thời gian
+    x_dates = mdates.date2num(timestamps)
+
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8.5), sharex=True)
     fig.patch.set_facecolor('#1e1e2e')
 
@@ -232,40 +161,45 @@ def generate_24h_chart():
         for spine in ax.spines.values():
             spine.set_color('#444466')
 
-    # --- Biểu đồ 1: Nhiệt độ CPU & Pin ---
-    ax1.plot(timestamps, cpu_temps, color='#ff5555', linewidth=2, label='CPU Temp (°C)')
-    ax1.plot(timestamps, bat_temps, color='#ffb86c', linewidth=1.5, linestyle='--', label='Battery Temp (°C)')
+    # --- Biểu đồ 1: Nhiệt độ CPU & Pin (Đã bỏ tham số pad gây lỗi trên matplotlib 2.x) ---
+    ax1.plot_date(x_dates, cpu_temps, '-', color='#ff5555', linewidth=2, label='CPU Temp (°C)')
+    ax1.plot_date(x_dates, bat_temps, '--', color='#ffb86c', linewidth=1.5, label='Battery Temp (°C)')
     ax1.axhline(y=50, color='#ff0000', linestyle=':', alpha=0.6, label='Ngưỡng cảnh báo (50°C)')
     ax1.set_ylabel('Nhiệt độ (°C)', color='#e0e0e0', fontweight='bold')
-    ax1.set_title('THÔNG SỐ HỆ THỐNG SERVER (24 GIỜ QUA)', color='#ffffff', fontweight='bold', pad=12)
-    ax1.legend(loc='upper left', facecolor='#252538', edgecolor='#444466', labelcolor='#ffffff')
+    ax1.set_title('THÔNG SỐ HỆ THỐNG SERVER (24 GIỜ QUA)', color='#ffffff', fontweight='bold')
+    lg1 = ax1.legend(loc='upper left', facecolor='#252538', edgecolor='#444466')
+    for text in lg1.get_texts():
+        text.set_color('#ffffff')
 
     # --- Biểu đồ 2: Hiệu năng CPU (%) & RAM (%) ---
-    ax2.plot(timestamps, cpu_pcts, color='#8be9fd', linewidth=1.8, label='CPU Usage (%)')
-    ax2.plot(timestamps, ram_pcts, color='#bd93f9', linewidth=2, label='RAM Usage (%)')
-    ax2.fill_between(timestamps, cpu_pcts, color='#8be9fd', alpha=0.1)
+    ax2.plot_date(x_dates, cpu_pcts, '-', color='#8be9fd', linewidth=1.8, label='CPU Usage (%)')
+    ax2.plot_date(x_dates, ram_pcts, '-', color='#bd93f9', linewidth=2, label='RAM Usage (%)')
+    ax2.fill_between(x_dates, cpu_pcts, 0, color='#8be9fd', alpha=0.1)
     ax2.set_ylabel('Tải (%)', color='#e0e0e0', fontweight='bold')
     ax2.set_ylim(0, 105)
-    ax2.legend(loc='upper left', facecolor='#252538', edgecolor='#444466', labelcolor='#ffffff')
+    lg2 = ax2.legend(loc='upper left', facecolor='#252538', edgecolor='#444466')
+    for text in lg2.get_texts():
+        text.set_color('#ffffff')
 
     # --- Biểu đồ 3: Phần trăm Pin ---
-    ax3.plot(timestamps, bat_pcts, color='#50fa7b', linewidth=2, label='Dung lượng Pin (%)')
-    valid_pcts = [p if p is not None else 0 for p in bat_pcts]
-    ax3.fill_between(timestamps, valid_pcts, color='#50fa7b', alpha=0.15)
+    ax3.plot_date(x_dates, bat_pcts, '-', color='#50fa7b', linewidth=2, label='Dung lượng Pin (%)')
+    ax3.fill_between(x_dates, bat_pcts, 0, color='#50fa7b', alpha=0.15)
     ax3.set_ylabel('Pin (%)', color='#e0e0e0', fontweight='bold')
     ax3.set_ylim(0, 105)
-    ax3.legend(loc='lower left', facecolor='#252538', edgecolor='#444466', labelcolor='#ffffff')
+    lg3 = ax3.legend(loc='lower left', facecolor='#252538', edgecolor='#444466')
+    for text in lg3.get_texts():
+        text.set_color('#ffffff')
 
     # Định dạng trục thời gian Giờ:Phút + Ngày/Tháng
     ax3.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d/%m'))
     plt.xticks(rotation=0)
     plt.tight_layout()
 
-    # Lưu ảnh vào bộ nhớ đệm RAM (BytesIO) thay vì ghi ra ổ cứng
+    # Lưu ảnh vào bộ nhớ đệm RAM (BytesIO)
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=130, facecolor=fig.get_facecolor())
     buf.seek(0)
-    plt.close(fig)  # Giải phóng RAM ngay lập tức sau khi vẽ xong
+    plt.close(fig)
     return buf
 
 # ================= LUỒNG CHẠY NGẦM HỢP NHẤT =================
@@ -327,7 +261,7 @@ def handle_buttons(message):
     # ----- 1. BẬT MÁY TÍNH -----
     if text == "⚡ Bật máy tính":
         bot.send_message(message.chat.id, "⏳ Đang kiểm tra...")
-        if is_pc_online(PC_IP, PC_MAC):
+        if check_pc_online():
             bot.send_message(message.chat.id, "🟢 Máy tính **ĐÃ BẬT SẴN**.", parse_mode="Markdown")
         else:
             subprocess.run(["wakeonlan", PC_MAC])
@@ -335,7 +269,7 @@ def handle_buttons(message):
 
     # ----- 2. TRẠNG THÁI PC -----
     elif text == "🖥️ Trạng thái PC":
-        if is_pc_online(PC_IP, PC_MAC):
+        if check_pc_online():
             bot.send_message(message.chat.id, "🟢 PC đang **ONLINE**!", parse_mode="Markdown")
         else:
             bot.send_message(message.chat.id, "🔴 PC đang **TẮT**.", parse_mode="Markdown")

@@ -71,16 +71,30 @@ def main_menu():
 # ================= KIỂM TRA TRẠNG THÁI PC ĐA TẦNG =================
 def is_pc_online(ip, mac=None):
     """Kiểm tra trạng thái PC chuẩn xác trên môi trường Linux/Android + Windows"""
-    # 1. Kiểm tra qua TCP Socket (Port 135 RPC, 445 SMB, 3389 RDP của Windows)
-    # Kể cả bị từ chối kết nối (errno 111 - Connection refused) cũng chứng tỏ PC đang BẬT
-    for port in (135, 445, 3389):
+    import errno
+
+    # 1. Kiểm tra qua TCP Socket (Port 445 SMB, 135 RPC, 3389 RDP, 139 NetBIOS)
+    # Kể cả bị từ chối kết nối (ECONNREFUSED) cũng chứng tỏ PC đang BẬT
+    # Chỉ timeout/unreachable mới là dấu hiệu host tắt
+    DEAD_ERRORS = {
+        errno.ETIMEDOUT,      # 110 - Timeout (firewall DROP hoặc host tắt)
+        errno.EHOSTUNREACH,   # 113 - No route to host
+        errno.ENETUNREACH,    # 101 - Network unreachable
+    }
+    for port in (445, 135, 3389, 139):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1.0)
+        s.settimeout(2.5)  # Tăng timeout từ 1s lên 2.5s để giảm false-negative
         try:
             result = s.connect_ex((ip, port))
-            if result in (0, 111):
+            # result == 0: kết nối thành công (port mở)
+            # result khác 0 nhưng KHÔNG thuộc nhóm DEAD: host đang phản hồi (VD: ECONNREFUSED)
+            if result == 0 or (result != 0 and result not in DEAD_ERRORS):
+                logger.info(f"PC online qua TCP port {port} (code={result})")
                 return True
-        except Exception:
+        except socket.timeout:
+            # Firewall DROP hoặc host tắt -> thử port tiếp theo
+            pass
+        except OSError:
             pass
         finally:
             s.close()
@@ -88,31 +102,49 @@ def is_pc_online(ip, mac=None):
     # 2. Kiểm tra bằng sudo ping (tránh lỗi thiếu quyền raw socket trên Linux Deploy)
     try:
         res = subprocess.run(
-            ["sudo", "ping", "-c", "1", "-W", "2", ip],
+            ["sudo", "ping", "-c", "2", "-W", "3", ip],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
         if res.returncode == 0:
+            logger.info("PC online qua ping")
             return True
     except Exception:
         pass
 
     # 3. Quét bảng ARP theo địa chỉ MAC (Phát hiện được kể cả khi Windows chặn Ping & Port)
     if mac:
+        target_mac = mac.lower().replace("-", ":")
         try:
-            # Gửi 1 gói UDP rỗng để kích thích cập nhật bảng ARP trước khi đọc
-            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            udp_sock.sendto(b"", (ip, 9))
-            udp_sock.close()
-            time.sleep(0.2)
+            # Gửi nhiều gói UDP có payload thực để kích thích cập nhật bảng ARP
+            for _ in range(3):
+                udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                udp_sock.sendto(b"\x00", (ip, 9))  # 1 byte thực thay vì rỗng
+                udp_sock.close()
+                time.sleep(0.15)
+            time.sleep(0.5)  # Chờ đủ thời gian cho ARP resolution hoàn tất
 
             with open("/proc/net/arp", "r") as f:
                 arp_table = f.read().lower()
-                target_mac = mac.lower().replace("-", ":")
                 for line in arp_table.splitlines():
                     # Cờ 0x2 trong /proc/net/arp nghĩa là thiết bị đang hiện diện (Complete)
                     if target_mac in line and "0x2" in line:
+                        logger.info("PC online qua ARP")
                         return True
+        except Exception:
+            pass
+
+        # 4. Thử arping trực tiếp (Layer 2, bypass mọi firewall)
+        try:
+            res = subprocess.run(
+                ["sudo", "arping", "-c", "2", "-w", "3", ip],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                universal_newlines=True
+            )
+            if res.returncode == 0 and target_mac in res.stdout.lower():
+                logger.info("PC online qua arping")
+                return True
         except Exception:
             pass
 

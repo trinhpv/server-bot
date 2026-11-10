@@ -1,4 +1,5 @@
 ﻿import telebot
+from telebot import apihelper
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import subprocess
 import socket
@@ -43,6 +44,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Chặn thư viện telebot tự in Traceback dài dòng mỗi khi mạng chập chờn nhẹ
+telebot.logger.setLevel(logging.CRITICAL)
+
+# Tăng thời gian chờ mặc định cho các lệnh gửi tin nhắn/ảnh (tránh ReadTimeout khi gửi biểu đồ)
+apihelper.CONNECT_TIMEOUT = 15
+apihelper.READ_TIMEOUT = 60
+
 # Cấu hình riêng cho Metrics (Chuẩn CSV)
 metrics_logger = logging.getLogger('metrics')
 metrics_logger.setLevel(logging.INFO)
@@ -73,7 +81,6 @@ def main_menu():
 # ================= KIỂM TRA TRẠNG THÁI PC (CHUẨN CODE GỐC) =================
 def check_pc_online():
     """Sử dụng đúng lệnh ping gốc hoạt động ổn định trên máy của bạn"""
-    # Thử ping 1 gói như code gốc, nếu hụt gói ARP đầu tiên thì thử lại ngay 1 lần nữa
     for _ in range(2):
         if subprocess.run(["ping", "-c", "1", "-W", "2", PC_IP], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
             return True
@@ -161,7 +168,7 @@ def generate_24h_chart():
         for spine in ax.spines.values():
             spine.set_color('#444466')
 
-    # --- Biểu đồ 1: Nhiệt độ CPU & Pin (Đã bỏ tham số pad gây lỗi trên matplotlib 2.x) ---
+    # --- Biểu đồ 1: Nhiệt độ CPU & Pin ---
     ax1.plot_date(x_dates, cpu_temps, '-', color='#ff5555', linewidth=2, label='CPU Temp (°C)')
     ax1.plot_date(x_dates, bat_temps, '--', color='#ffb86c', linewidth=1.5, label='Battery Temp (°C)')
     ax1.axhline(y=50, color='#ff0000', linestyle=':', alpha=0.6, label='Ngưỡng cảnh báo (50°C)')
@@ -403,7 +410,8 @@ if __name__ == '__main__':
 
     while True:
         try:
-            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+            # Tăng timeout lên 60s và long_polling_timeout lên 30s để triệt tiêu lỗi ReadTimeout
+            bot.infinity_polling(timeout=60, long_polling_timeout=30)
         except Exception as e:
-            logger.error(f"Lỗi polling: {e}. Thử lại sau 5 giây...")
+            logger.warning(f"Mất kết nối tới Telegram ({e}). Đang kết nối lại sau 5 giây...")
             time.sleep(5)

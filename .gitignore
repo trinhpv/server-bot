@@ -1,4 +1,5 @@
 config.py
 __pycache__/
 *.log
-system_metrics.txt
+system_metrics.csv
+system_metrics.csv.*

@@ -1,6 +1,7 @@
 ﻿import telebot
 from telebot import apihelper
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+import urllib3.connection
 import subprocess
 import socket
 import threading
@@ -47,9 +48,25 @@ logger = logging.getLogger(__name__)
 # Chặn thư viện telebot tự in Traceback dài dòng mỗi khi mạng chập chờn nhẹ
 telebot.logger.setLevel(logging.CRITICAL)
 
-# Tăng thời gian chờ mặc định cho các lệnh gửi tin nhắn/ảnh (tránh ReadTimeout khi gửi biểu đồ)
-apihelper.CONNECT_TIMEOUT = 15
-apihelper.READ_TIMEOUT = 60
+# ================= TỐI ƯU KẾT NỐI CHỐNG TREO SAU KHI NHÀN RỖI LÂU =================
+def enable_tcp_keepalive():
+    """Bật TCP Keep-Alive ở tầng Socket hệ điều hành để giữ kết nối qua NAT/Router luôn thông suốt"""
+    opts = list(urllib3.connection.HTTPConnection.default_socket_options)
+    opts.append((socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1))
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        opts.append((socket.SOL_TCP, socket.TCP_KEEPIDLE, 45))   # Gửi probe sau 45s nhàn rỗi
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        opts.append((socket.SOL_TCP, socket.TCP_KEEPINTVL, 15))  # Lặp lại mỗi 15s nếu chưa phản hồi
+    if hasattr(socket, "TCP_KEEPCNT"):
+        opts.append((socket.SOL_TCP, socket.TCP_KEEPCNT, 3))     # Đóng socket ngay sau 3 lần thất bại
+    urllib3.connection.HTTPConnection.default_socket_options = opts
+
+enable_tcp_keepalive()
+
+# Tự động tái tạo Session sau mỗi 5 phút (300s) để loại bỏ hoàn toàn các socket cũ bị Router ngắt ngầm
+apihelper.SESSION_TIME_TO_LIVE = 300
+apihelper.CONNECT_TIMEOUT = 10
+apihelper.READ_TIMEOUT = 30
 
 # Cấu hình riêng cho Metrics (Chuẩn CSV)
 metrics_logger = logging.getLogger('metrics')
@@ -64,8 +81,11 @@ metrics_logger.addHandler(metrics_handler)
 if not os.path.exists(METRICS_FILE) or os.path.getsize(METRICS_FILE) == 0:
     metrics_logger.info("cpu_pct,cpu_temp,ram_pct,disk_pct,bat_pct,bat_temp,bat_status")
 
-# KHỞI TẠO BOT
-bot = telebot.TeleBot(BOT_TOKEN)
+# KHỞI TẠO BOT (Tăng num_threads=4 để không bị nghẽn hàng đợi khi bấm nhiều lệnh liên tiếp)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=4)
+
+# Khóa bảo vệ matplotlib không bị xung đột khi có nhiều lệnh vẽ biểu đồ cùng lúc
+chart_lock = threading.Lock()
 
 # ================= MENU =================
 def main_menu():
@@ -155,59 +175,63 @@ def generate_24h_chart():
     if len(timestamps) < 2:
         return None
 
-    # Quy đổi datetime sang số thực chuẩn của matplotlib cũ để tránh lỗi trục thời gian
-    x_dates = mdates.date2num(timestamps)
+    # Khóa luồng khi dùng matplotlib.pyplot để tránh xung đột nếu bấm nút nhiều lần
+    with chart_lock:
+        # Quy đổi datetime sang số thực chuẩn của matplotlib cũ để tránh lỗi trục thời gian
+        x_dates = mdates.date2num(timestamps)
 
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8.5), sharex=True)
-    fig.patch.set_facecolor('#1e1e2e')
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8.5), sharex=True)
+        try:
+            fig.patch.set_facecolor('#1e1e2e')
 
-    for ax in (ax1, ax2, ax3):
-        ax.set_facecolor('#252538')
-        ax.grid(True, linestyle='--', alpha=0.25, color='#ffffff')
-        ax.tick_params(colors='#e0e0e0')
-        for spine in ax.spines.values():
-            spine.set_color('#444466')
+            for ax in (ax1, ax2, ax3):
+                ax.set_facecolor('#252538')
+                ax.grid(True, linestyle='--', alpha=0.25, color='#ffffff')
+                ax.tick_params(colors='#e0e0e0')
+                for spine in ax.spines.values():
+                    spine.set_color('#444466')
 
-    # --- Biểu đồ 1: Nhiệt độ CPU & Pin ---
-    ax1.plot_date(x_dates, cpu_temps, '-', color='#ff5555', linewidth=2, label='CPU Temp (°C)')
-    ax1.plot_date(x_dates, bat_temps, '--', color='#ffb86c', linewidth=1.5, label='Battery Temp (°C)')
-    ax1.axhline(y=50, color='#ff0000', linestyle=':', alpha=0.6, label='Ngưỡng cảnh báo (50°C)')
-    ax1.set_ylabel('Nhiệt độ (°C)', color='#e0e0e0', fontweight='bold')
-    ax1.set_title('THÔNG SỐ HỆ THỐNG SERVER (24 GIỜ QUA)', color='#ffffff', fontweight='bold')
-    lg1 = ax1.legend(loc='upper left', facecolor='#252538', edgecolor='#444466')
-    for text in lg1.get_texts():
-        text.set_color('#ffffff')
+            # --- Biểu đồ 1: Nhiệt độ CPU & Pin ---
+            ax1.plot_date(x_dates, cpu_temps, '-', color='#ff5555', linewidth=2, label='CPU Temp (°C)')
+            ax1.plot_date(x_dates, bat_temps, '--', color='#ffb86c', linewidth=1.5, label='Battery Temp (°C)')
+            ax1.axhline(y=50, color='#ff0000', linestyle=':', alpha=0.6, label='Ngưỡng cảnh báo (50°C)')
+            ax1.set_ylabel('Nhiệt độ (°C)', color='#e0e0e0', fontweight='bold')
+            ax1.set_title('THÔNG SỐ HỆ THỐNG SERVER (24 GIỜ QUA)', color='#ffffff', fontweight='bold')
+            lg1 = ax1.legend(loc='upper left', facecolor='#252538', edgecolor='#444466')
+            for text in lg1.get_texts():
+                text.set_color('#ffffff')
 
-    # --- Biểu đồ 2: Hiệu năng CPU (%) & RAM (%) ---
-    ax2.plot_date(x_dates, cpu_pcts, '-', color='#8be9fd', linewidth=1.8, label='CPU Usage (%)')
-    ax2.plot_date(x_dates, ram_pcts, '-', color='#bd93f9', linewidth=2, label='RAM Usage (%)')
-    ax2.fill_between(x_dates, cpu_pcts, 0, color='#8be9fd', alpha=0.1)
-    ax2.set_ylabel('Tải (%)', color='#e0e0e0', fontweight='bold')
-    ax2.set_ylim(0, 105)
-    lg2 = ax2.legend(loc='upper left', facecolor='#252538', edgecolor='#444466')
-    for text in lg2.get_texts():
-        text.set_color('#ffffff')
+            # --- Biểu đồ 2: Hiệu năng CPU (%) & RAM (%) ---
+            ax2.plot_date(x_dates, cpu_pcts, '-', color='#8be9fd', linewidth=1.8, label='CPU Usage (%)')
+            ax2.plot_date(x_dates, ram_pcts, '-', color='#bd93f9', linewidth=2, label='RAM Usage (%)')
+            ax2.fill_between(x_dates, cpu_pcts, 0, color='#8be9fd', alpha=0.1)
+            ax2.set_ylabel('Tải (%)', color='#e0e0e0', fontweight='bold')
+            ax2.set_ylim(0, 105)
+            lg2 = ax2.legend(loc='upper left', facecolor='#252538', edgecolor='#444466')
+            for text in lg2.get_texts():
+                text.set_color('#ffffff')
 
-    # --- Biểu đồ 3: Phần trăm Pin ---
-    ax3.plot_date(x_dates, bat_pcts, '-', color='#50fa7b', linewidth=2, label='Dung lượng Pin (%)')
-    ax3.fill_between(x_dates, bat_pcts, 0, color='#50fa7b', alpha=0.15)
-    ax3.set_ylabel('Pin (%)', color='#e0e0e0', fontweight='bold')
-    ax3.set_ylim(0, 105)
-    lg3 = ax3.legend(loc='lower left', facecolor='#252538', edgecolor='#444466')
-    for text in lg3.get_texts():
-        text.set_color('#ffffff')
+            # --- Biểu đồ 3: Phần trăm Pin ---
+            ax3.plot_date(x_dates, bat_pcts, '-', color='#50fa7b', linewidth=2, label='Dung lượng Pin (%)')
+            ax3.fill_between(x_dates, bat_pcts, 0, color='#50fa7b', alpha=0.15)
+            ax3.set_ylabel('Pin (%)', color='#e0e0e0', fontweight='bold')
+            ax3.set_ylim(0, 105)
+            lg3 = ax3.legend(loc='lower left', facecolor='#252538', edgecolor='#444466')
+            for text in lg3.get_texts():
+                text.set_color('#ffffff')
 
-    # Định dạng trục thời gian Giờ:Phút + Ngày/Tháng
-    ax3.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d/%m'))
-    plt.xticks(rotation=0)
-    plt.tight_layout()
+            # Định dạng trục thời gian Giờ:Phút + Ngày/Tháng
+            ax3.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d/%m'))
+            plt.xticks(rotation=0)
+            plt.tight_layout()
 
-    # Lưu ảnh vào bộ nhớ đệm RAM (BytesIO)
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=130, facecolor=fig.get_facecolor())
-    buf.seek(0)
-    plt.close(fig)
-    return buf
+            # Lưu ảnh vào bộ nhớ đệm RAM (BytesIO)
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=130, facecolor=fig.get_facecolor())
+            buf.seek(0)
+            return buf
+        finally:
+            plt.close(fig)
 
 # ================= LUỒNG CHẠY NGẦM HỢP NHẤT =================
 def unified_background_worker():
@@ -264,7 +288,7 @@ def handle_buttons(message):
     text = message.text
 
     logger.info(f"Admin yêu cầu lệnh: '{text}'")
-    
+
     # ----- 1. BẬT MÁY TÍNH -----
     if text == "⚡ Bật máy tính":
         bot.send_message(message.chat.id, "⏳ Đang kiểm tra...")
@@ -287,11 +311,11 @@ def handle_buttons(message):
             bot.send_message(message.chat.id, "⏳ Đang thu thập dữ liệu...")
             uptime_str = str(datetime.timedelta(seconds=int(time.time() - psutil.boot_time())))
             os_info = f"{platform.system()} {platform.release()}"
-            
+
             m = get_system_metrics()
             cpu_temp_str = f"{m['cpu_temp']}°C" if m['cpu_temp'] != -1.0 else "N/A"
             bat_temp_str = f"{m['bat_temp']}°C" if m['bat_temp'] != -1.0 else "N/A"
-            
+
             bat_st = m["bat_status"]
             if bat_st == "Charging":
                 bat_st_vn = "Đang sạc ⚡"
@@ -410,8 +434,8 @@ if __name__ == '__main__':
 
     while True:
         try:
-            # Tăng timeout lên 60s và long_polling_timeout lên 30s để triệt tiêu lỗi ReadTimeout
-            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+            # Chu kỳ polling ngắn gọn (20s) giúp phát hiện rớt mạng ngầm và kết nối lại tức thì
+            bot.infinity_polling(timeout=25, long_polling_timeout=20, skip_pending=False)
         except Exception as e:
-            logger.warning(f"Mất kết nối tới Telegram ({e}). Đang kết nối lại sau 5 giây...")
-            time.sleep(5)
+            logger.warning(f"Mất kết nối tới Telegram ({e}). Đang kết nối lại sau 3 giây...")
+            time.sleep(3)

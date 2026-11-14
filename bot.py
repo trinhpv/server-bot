@@ -8,6 +8,8 @@ import threading
 import time
 import logging
 from logging.handlers import RotatingFileHandler
+from collections import deque
+import html
 import sys
 import psutil
 import datetime
@@ -47,8 +49,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ServerBot")
 
-# Để mức ERROR thay vì CRITICAL để vẫn bắt được lỗi rớt mạng nghiêm trọng nếu có
-telebot.logger.setLevel(logging.ERROR)
+# Chặn hoàn toàn việc thư viện telebot tự xả Traceback dài dòng vào file log
+telebot.logger.setLevel(logging.CRITICAL)
 
 # ================= TỐI ƯU SOCKET & CHỐNG TREO KẾT NỐI SAU KHI NHÀN RỖI =================
 def enable_tcp_keepalive():
@@ -67,10 +69,10 @@ def enable_tcp_keepalive():
 
 enable_tcp_keepalive()
 
-# Cấu hình timeout cho TeleBot API
+# Cấu hình timeout cho TeleBot API (READ_TIMEOUT=30s lớn gấp đôi chu kỳ polling 15s)
 apihelper.SESSION_TIME_TO_LIVE = 60
-apihelper.CONNECT_TIMEOUT = 8
-apihelper.READ_TIMEOUT = 20
+apihelper.CONNECT_TIMEOUT = 10
+apihelper.READ_TIMEOUT = 30
 
 # Bộ quản lý Session theo từng luồng (Thread-Local) & Đo độ trễ Telegram API
 _thread_state = threading.local()
@@ -128,7 +130,11 @@ def _monitored_make_request(token, method_name, method='get', params=None, files
             _thread_state.last_api_ms = retry_ms
             logger.info(f"[API_RETRY_OK] Method={method_name} thành công ở lần thử 2 | Retry_Latency={retry_ms:.1f}ms")
             return result
-        raise
+        else:
+            # Bắt gọn lỗi chập chờn mạng của getUpdates, chỉ ghi 1 dòng gọn gàng và trả về [] để PollingThread không bị văng Traceback
+            logger.info(f"[POLL_REFRESH] Mạng chập chờn nhẹ sau {api_ms:.0f}ms ({type(e).__name__}) -> Đã làm mới kết nối chờ tin nhắn.")
+            time.sleep(1)
+            return []
 
 # Kích hoạt Middleware giám sát API
 apihelper._make_request = _monitored_make_request
@@ -361,6 +367,53 @@ def send_welcome(message):
     total_ms = (time.perf_counter() - t0) * 1000.0
     logger.info(f"[CMD_DONE] Cmd='/start' | Total_Response={total_ms:.1f}ms")
 
+@bot.message_handler(commands=['log'])
+def send_recent_logs(message):
+    """Lệnh ngầm /log (hoặc /log N): In ra 15 dòng cuối của file bot_activity.log"""
+    if message.chat.id != MY_CHAT_ID:
+        logger.warning(f"[UNAUTHORIZED] Chặn truy cập /log từ chat_id={message.chat.id}")
+        return
+
+    t_cmd_start = time.perf_counter()
+    parts = message.text.strip().split()
+    num_lines = 15
+    if len(parts) > 1 and parts[1].isdigit():
+        num_lines = max(1, min(int(parts[1]), 50))
+
+    try:
+        t_proc = time.perf_counter()
+        if not os.path.exists(LOG_FILE):
+            bot.send_message(message.chat.id, "⚠️ Chưa tìm thấy file `bot_activity.log`.", parse_mode="Markdown")
+            return
+
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            last_lines = list(deque(f, maxlen=num_lines))
+
+        proc_ms = (time.perf_counter() - t_proc) * 1000.0
+        raw_log = "".join(last_lines).strip() or "File log hiện đang trống."
+
+        # Giới hạn an toàn 3800 ký tự để không vượt ngưỡng 4096 ký tự của Telegram
+        if len(raw_log) > 3800:
+            raw_log = "...(đã cắt bớt)...\n" + raw_log[-3800:]
+
+        escaped_log = html.escape(raw_log)
+        reply_html = (
+            f"📜 <b>{len(last_lines)} dòng log mới nhất (bot_activity.log):</b>\n"
+            f"<pre>{escaped_log}</pre>\n"
+            f"⏱ <i>Đọc file: {proc_ms:.1f}ms</i>"
+        )
+        bot.send_message(message.chat.id, reply_html, parse_mode="HTML")
+
+        total_ms = (time.perf_counter() - t_cmd_start) * 1000.0
+        last_api_ms = getattr(_thread_state, 'last_api_ms', 0.0)
+        logger.info(
+            f"[CMD_DONE] MsgID={message.message_id} | Cmd='{message.text}' | "
+            f"Server_Proc={proc_ms:.1f}ms | Last_API={last_api_ms:.1f}ms | Total_Time={total_ms:.1f}ms"
+        )
+    except Exception as e:
+        logger.error(f"[CMD_FAIL] Lỗi khi đọc file log (/log): {e}")
+        bot.send_message(message.chat.id, f"⚠️ Lỗi khi đọc log: {e}")
+
 @bot.message_handler(func=lambda message: True)
 def handle_buttons(message):
     t_cmd_start = time.perf_counter()
@@ -400,7 +453,6 @@ def handle_buttons(message):
 
         # ----- 2. TRẠNG THÁI PC -----
         elif text == "🖥️ Trạng thái PC":
-            # Gửi phản hồi ngay lập tức để người dùng biết bot đã nhận lệnh (không bị tưởng nhầm là đơ)
             wait_msg = bot.send_message(message.chat.id, "🔍 Đang ping kiểm tra PC...")
             t_proc = time.perf_counter()
             is_online = check_pc_online()
@@ -563,9 +615,9 @@ if __name__ == '__main__':
 
     while True:
         try:
-            # Hạ long_polling_timeout=15s để đồng bộ tốt hơn với TCP_KEEPIDLE=10s
-            logger.info("[POLLING] Bắt đầu vòng lặp infinity_polling (timeout=20s, long_poll=15s)...")
-            bot.infinity_polling(timeout=20, long_polling_timeout=15, skip_pending=False)
+            # timeout=15s để Telegram trả kết nối sớm hơn hẳn mức READ_TIMEOUT=30s của urllib3
+            logger.info("[POLLING] Bắt đầu vòng lặp infinity_polling (timeout=15s, read_timeout=30s)...")
+            bot.infinity_polling(timeout=15, long_polling_timeout=15, skip_pending=False)
         except Exception as e:
             logger.warning(f"[POLLING_DROP] Mất kết nối tới Telegram ({e}). Đang làm mới session và kết nối lại sau 3 giây...")
             _reset_current_thread_session()
